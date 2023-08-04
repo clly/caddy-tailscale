@@ -3,6 +3,7 @@ package tscaddy
 import (
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -56,7 +57,8 @@ func (t *TailscaleCaddyTransport) RoundTrip(request *http.Request) (*http.Respon
 }
 
 func (t *TailscaleCaddyTransport) Cleanup() error {
-	t.logger.Debug("cleaning up tsnet")
+	t.server.Logf("cleaning up tsnet")
+	fmt.Fprintln(os.Stderr, "called")
 	return t.server.Destruct()
 }
 
