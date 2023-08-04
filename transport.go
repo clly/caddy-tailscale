@@ -1,6 +1,7 @@
 package tscaddy
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ func (t *TailscaleCaddyTransport) UnmarshalCaddyfile(d *caddyfile.Dispenser) err
 
 func (t *TailscaleCaddyTransport) Provision(context caddy.Context) error {
 	t.logger = context.Logger()
+	fmt.Fprintln(os.Stderr, "Provision")
 
 	s, err := getServer("", "caddy-tsnet-client:80")
 	if err != nil {
@@ -59,7 +61,8 @@ func (t *TailscaleCaddyTransport) RoundTrip(request *http.Request) (*http.Respon
 func (t *TailscaleCaddyTransport) Cleanup() error {
 	t.server.Logf("cleaning up tsnet")
 	fmt.Fprintln(os.Stderr, "called")
-	return t.server.Destruct()
+	t.server.Destruct()
+	return errors.New("Force this error")
 }
 
 var (
