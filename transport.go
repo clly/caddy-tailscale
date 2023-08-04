@@ -55,8 +55,14 @@ func (t *TailscaleCaddyTransport) RoundTrip(request *http.Request) (*http.Respon
 	return t.server.HTTPClient().Transport.RoundTrip(request)
 }
 
+func (t *TailscaleCaddyTransport) Cleanup() error {
+	t.logger.Debug("cleaning up tsnet")
+	return t.server.Destruct()
+}
+
 var (
 	_ http.RoundTripper     = (*TailscaleCaddyTransport)(nil)
 	_ caddy.Provisioner     = (*TailscaleCaddyTransport)(nil)
+	_ caddy.CleanerUpper    = (*TailscaleCaddyTransport)(nil)
 	_ caddyfile.Unmarshaler = (*TailscaleCaddyTransport)(nil)
 )
