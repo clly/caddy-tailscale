@@ -10,6 +10,8 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -126,7 +128,9 @@ func getServer(_, addr string) (*tsnetServerDestructor, error) {
 		}
 
 		return &tsnetServerDestructor{
-			s,
+			Server: s,
+			wg:     &sync.WaitGroup{},
+			once:   &sync.Once{},
 		}, nil
 	})
 	if err != nil {
@@ -229,8 +233,76 @@ func parseCaddyfile(_ httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 
 type tsnetServerDestructor struct {
 	*tsnet.Server
+	wg   *sync.WaitGroup
+	once *sync.Once
+}
+
+func (t *tsnetServerDestructor) Listen(network, addr string) (net.Listener, error) {
+	t.wg.Add(1)
+	ln, err := t.Server.Listen(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return &tsnetServerListener{
+		ln:     ln,
+		d:      t.wg,
+		closer: t,
+	}, nil
 }
 
 func (t tsnetServerDestructor) Destruct() error {
-	return t.Close()
+	return t.Server.Close()
 }
+
+func (t tsnetServerDestructor) Close() error {
+	var err error
+	t.once.Do(func() {
+		t.wg.Wait()
+		err = t.Destruct()
+		time.Sleep(5 * time.Second)
+	})
+
+	return err
+}
+
+// tsnetServerListener wraps a net.Listener calling Done on close. This will in tern signal the tsnetServerDestructor to shutdown the server when all listeners are closed
+type tsnetServerListener struct {
+	ln     net.Listener
+	d      doner
+	closer closer
+}
+
+type doner interface {
+	Done()
+}
+
+type closer interface {
+	Close() error
+}
+
+func (t *tsnetServerListener) Accept() (net.Conn, error) {
+	return t.ln.Accept()
+}
+
+func (t *tsnetServerListener) Close() error {
+	t.d.Done()
+	closeErr := t.ln.Close()
+	var err error
+	if closeErr != nil {
+		err = fmt.Errorf("failed to close listener: %w", err)
+	}
+	destroyErr := t.closer.Close()
+	if destroyErr != nil {
+		err = fmt.Errorf("failed to destroy ts server %w", err)
+	}
+
+	return err
+}
+
+func (t *tsnetServerListener) Addr() net.Addr {
+	return t.ln.Addr()
+}
+
+var (
+	_ net.Listener = (*tsnetServerListener)(nil)
+)
