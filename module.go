@@ -10,8 +10,7 @@ import (
 	"os"
 	"path"
 	"strings"
-	"sync"
-	"time"
+	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -105,6 +104,8 @@ func getServer(_, addr string) (*tsnetServerDestructor, error) {
 				}
 			},
 		}
+		// how do we configure this?
+		s.Ephemeral = true
 
 		if host != "" {
 			// Set authkey to "TS_AUTHKEY_<HOST>".  If empty,
@@ -128,9 +129,8 @@ func getServer(_, addr string) (*tsnetServerDestructor, error) {
 		}
 
 		return &tsnetServerDestructor{
-			Server: s,
-			wg:     &sync.WaitGroup{},
-			once:   &sync.Once{},
+			Server:    s,
+			listeners: &atomic.Int64{},
 		}, nil
 	})
 	if err != nil {
@@ -232,52 +232,47 @@ func parseCaddyfile(_ httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 }
 
 type tsnetServerDestructor struct {
+	// listeners keeps track of how many listeners are currently listening
+	listeners *atomic.Int64
+
 	*tsnet.Server
-	wg   *sync.WaitGroup
-	once *sync.Once
 }
 
 func (t *tsnetServerDestructor) Listen(network, addr string) (net.Listener, error) {
-	t.wg.Add(1)
 	ln, err := t.Server.Listen(network, addr)
 	if err != nil {
 		return nil, err
 	}
+
+	t.listeners.Add(1)
+
 	return &tsnetServerListener{
-		ln:     ln,
-		d:      t.wg,
-		closer: t,
+		ln: ln,
+		// Destructor gets called on listener Close() and lets us hide some of the implementation
+		Destructor: destructorFunc(func() error {
+			t.listeners.Add(-1)
+			if t.listeners.Load() == 0 {
+				return t.Destruct()
+			}
+			return nil
+		}),
 	}, nil
+}
+
+type destructorFunc func() error
+
+func (d destructorFunc) Destruct() error {
+	return d()
 }
 
 func (t tsnetServerDestructor) Destruct() error {
 	return t.Server.Close()
 }
 
-func (t tsnetServerDestructor) Close() error {
-	var err error
-	t.once.Do(func() {
-		t.wg.Wait()
-		err = t.Destruct()
-		time.Sleep(5 * time.Second)
-	})
-
-	return err
-}
-
 // tsnetServerListener wraps a net.Listener calling Done on close. This will in tern signal the tsnetServerDestructor to shutdown the server when all listeners are closed
 type tsnetServerListener struct {
-	ln     net.Listener
-	d      doner
-	closer closer
-}
-
-type doner interface {
-	Done()
-}
-
-type closer interface {
-	Close() error
+	ln net.Listener
+	caddy.Destructor
 }
 
 func (t *tsnetServerListener) Accept() (net.Conn, error) {
@@ -285,15 +280,13 @@ func (t *tsnetServerListener) Accept() (net.Conn, error) {
 }
 
 func (t *tsnetServerListener) Close() error {
-	t.d.Done()
-	closeErr := t.ln.Close()
 	var err error
+	closeErr := t.ln.Close()
 	if closeErr != nil {
-		err = fmt.Errorf("failed to close listener: %w", err)
+		err = fmt.Errorf("failed to close listener: %w", closeErr)
 	}
-	destroyErr := t.closer.Close()
-	if destroyErr != nil {
-		err = fmt.Errorf("failed to destroy ts server %w", err)
+	if destructErr := t.Destruct(); destructErr != nil {
+		err = fmt.Errorf("failed to close server: %w: %w", destructErr, err)
 	}
 
 	return err
@@ -304,5 +297,6 @@ func (t *tsnetServerListener) Addr() net.Addr {
 }
 
 var (
-	_ net.Listener = (*tsnetServerListener)(nil)
+	_ net.Listener     = (*tsnetServerListener)(nil)
+	_ caddy.Destructor = (*tsnetServerListener)(nil)
 )
